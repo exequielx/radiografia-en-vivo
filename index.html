@@ -16,7 +16,10 @@
 html,body{height:100%;margin:0;background:var(--film);color:var(--ink);font-family:var(--mono);overflow:hidden}
 #stage{position:fixed;inset:0;background:var(--film)}
 #stage video,#stage canvas{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
-video{filter:grayscale(1) brightness(.5) contrast(1.2);transition:opacity .25s}
+video{transition:opacity .25s}
+#c{mix-blend-mode:screen}
+.rng{display:flex;align-items:center;gap:8px;font:600 11px/1 var(--mono);letter-spacing:.06em;text-transform:uppercase;color:var(--ink);background:var(--panel);border:1px solid var(--line);border-radius:4px;padding:6px 10px}
+.rng input{width:96px;accent-color:var(--amber)}
 video.off{opacity:0}
 .mirror{transform:scaleX(-1)}
 #vig{position:fixed;inset:0;pointer-events:none;background:radial-gradient(ellipse at center,transparent 55%,rgba(0,0,0,.6) 100%)}
@@ -41,7 +44,8 @@ button:focus-visible{outline:2px solid var(--bone);outline-offset:2px}
 </head>
 <body>
 <div id="stage">
-  <video id="v" class="off" playsinline muted autoplay></video>
+  <video id="v" playsinline muted autoplay></video>
+  <canvas id="veil"></canvas>
   <canvas id="c"></canvas>
 </div>
 <div id="vig"></div>
@@ -52,16 +56,18 @@ button:focus-visible{outline:2px solid var(--bone);outline-offset:2px}
 </div>
 
 <div id="bar" hidden>
-  <button id="bMus" aria-pressed="false">Músculos y vasos</button>
-  <button id="bBrain" aria-pressed="false">Cerebro</button>
+  <button id="bMus" aria-pressed="true">Músculos y vasos</button>
+  <button id="bBrain" aria-pressed="true">Cerebro</button>
   <button id="bBody" aria-pressed="true">Cuerpo</button>
-  <button id="bCam" aria-pressed="false">Cámara</button>
+  <button id="bCam" aria-pressed="true">Cámara</button>
   <button id="bFlip">Girar cámara</button>
+  <label class="rng" for="rSkin">Piel <input id="rSkin" type="range" min="0" max="90" value="50"></label>
+  <label class="rng" for="rLayer">Capa <input id="rLayer" type="range" min="15" max="100" value="85"></label>
 </div>
 
 <div id="gate">
   <h1>Radiografía en vivo</h1>
-  <p>Mostrá la mano a la cámara: se dibujan falanges, metacarpos, los ocho carpos, radio y cúbito. Con la cara en cuadro aparece el cráneo, y con el torso, columna, costillas y pelvis. Músculos, vasos y cerebro se prenden desde la barra de abajo.</p>
+  <p>Mostrá la mano a la cámara: se dibujan falanges, metacarpos, los ocho carpos, radio y cúbito. Con la cara en cuadro aparece el cráneo, y con el torso, columna, costillas y pelvis. Tu imagen real queda a la vista y la capa interna se superpone semitransparente; con los controles de abajo regulás cuánto se oscurece la piel y cuánto se ve la capa.</p>
   <p>Todo corre en tu dispositivo; el video no sale de acá.</p>
   <button id="go">Encender cámara</button>
   <p id="msg" role="status"></p>
@@ -72,14 +78,16 @@ const LIB="https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14";
 const MODELS="https://storage.googleapis.com/mediapipe-models/";
 const $=id=>document.getElementById(id);
 const video=$("v"),canvas=$("c"),ctx=canvas.getContext("2d"),msg=$("msg");
-const O={musc:false,brain:false,body:true,cam:false};
+const O={musc:true,brain:true,body:true,cam:true};
+let skinA=.5,layerA=.85;
+const veil=$("veil"),vctx=veil.getContext("2d");
 let facing="user",stream=null,hand,face,pose,seg=null,W=0,H=0,maskT=-1e9;
 const R={hands:null,face:null,pose:null};
 const HASF=typeof ctx.filter==="string";
 
 /* lienzos de trabajo: D densidad (huesos), T0/T tejido blando, M máscara, G tinte del halo */
 const mk=()=>{const c=document.createElement("canvas");return[c,c.getContext("2d")]};
-const[D,dctx]=mk(),[T0,t0ctx]=mk(),[T,tctx]=mk(),[M,mctx]=mk(),[G,gctx]=mk();
+const[D,dctx]=mk(),[T0,t0ctx]=mk(),[T,tctx]=mk(),[M,mctx]=mk(),[G,gctx]=mk(),[Mu,muctx]=mk(),[Br,brctx]=mk();
 let maskImg=null,bx=dctx;
 const CORE="225,243,255",HALO="#3d9cff";
 
@@ -544,30 +552,40 @@ function render(t){
   t0ctx.clearRect(0,0,W,H);
   if(t-maskT<700)t0ctx.drawImage(M,0,0,W,H);
   HG.forEach(h=>handFlesh(h,t0ctx));
+  if(SK){t0ctx.fillStyle="#fff";t0ctx.fill(ell(SK.cc,SK.w*.55,SK.h*.47,SK.th));t0ctx.fill(poly(JAW.map(i=>SK.g(i))))}
   tctx.globalCompositeOperation="source-over";tctx.clearRect(0,0,W,H);tctx.drawImage(T0,0,0);
   tctx.globalCompositeOperation="destination-out";tctx.globalAlpha=1;
   if(HASF)tctx.filter=`blur(${(W/45).toFixed(1)}px)`;tctx.drawImage(T0,0,0);
   tctx.filter="none";tctx.globalAlpha=1;tctx.globalCompositeOperation="source-over";
 
-  // estructuras
-  bx=dctx;dctx.globalCompositeOperation="source-over";dctx.clearRect(0,0,W,H);dctx.globalCompositeOperation="lighter";
-  dctx.lineCap=dctx.lineJoin="round";
-  if(O.brain&&SK)drawBrain(SK,t);
+  // estructuras, cada capa en su lienzo para teñirla aparte
+  const clr=c=>{c.globalCompositeOperation="source-over";c.clearRect(0,0,W,H);c.globalCompositeOperation="lighter";c.lineCap=c.lineJoin="round"};
+  clr(brctx);clr(muctx);clr(dctx);
+  if(O.brain&&SK){bx=brctx;drawBrain(SK,t)}
+  if(O.musc){bx=muctx;if(SK)faceSoft(SK);if(BG)bodySoft(BG,handled);HG.forEach(handSoft)}
+  bx=dctx;
   if(SK)drawSkull(SK);
-  if(O.musc){if(SK)faceSoft(SK);if(BG)bodySoft(BG,handled);HG.forEach(handSoft)}
   if(BG)drawBody(BG,handled);
   HG.forEach(drawHand);
 
-  // composición
+  // velo: oscurece la piel solo donde se ve hacia adentro (cara, mano, cuerpo)
+  vctx.clearRect(0,0,W,H);
+  if(O.cam&&skinA>0){
+    vctx.globalAlpha=skinA;if(HASF)vctx.filter=`blur(${(W/60).toFixed(1)}px)`;
+    vctx.drawImage(tint(T0,"#010812"),0,0);vctx.filter="none";vctx.globalAlpha=1;
+  }
+
+  // capa interna: se suma sobre la cámara (el lienzo usa mezcla "screen")
   ctx.globalCompositeOperation="source-over";ctx.globalAlpha=1;ctx.filter="none";
-  ctx.clearRect(0,0,W,H);ctx.fillStyle=O.cam?"rgba(1,3,6,.72)":"#010306";ctx.fillRect(0,0,W,H);
+  ctx.fillStyle="#000";ctx.fillRect(0,0,W,H);
   ctx.globalCompositeOperation="lighter";
-  blurDraw(T0,W/60,.035);
-  blurDraw(tint(T,"#9fd2ff"),W/600,.75);
-  blurDraw(G,W/80,.4);
-  blurDraw(D,W/1100,1);
-  tint(D,HALO);blurDraw(G,W/160,.55);blurDraw(G,W/45,.28);
-  grain();
+  const L=layerA;
+  if(!O.cam){blurDraw(T0,W/60,.035);blurDraw(tint(T,"#9fd2ff"),W/600,.75);blurDraw(G,W/80,.4)}
+  if(O.brain){blurDraw(tint(Br,"#ff6f9f"),W/1000,.95*L);blurDraw(G,W/90,.5*L)}
+  if(O.musc){blurDraw(tint(Mu,"#ff3d3d"),W/1000,L);blurDraw(G,W/110,.45*L)}
+  blurDraw(tint(D,"#f2f7ff"),W/1100,L);
+  tint(D,HALO);blurDraw(G,W/160,.5*L);blurDraw(G,W/45,.22*L);
+  if(!O.cam)grain();
 
   const seen=[HG.length&&(HG.length>1?"2 manos":"mano"),SK&&"cráneo",BG&&"cuerpo"].filter(Boolean);
   $("what").textContent=seen.length?seen.join(" + "):"mostrá la mano";
@@ -579,7 +597,7 @@ function loop(){
   if(video.readyState<2||video.currentTime===lastT||!video.videoWidth)return;
   lastT=video.currentTime;
   const k=Math.min(1,640/video.videoWidth),w=Math.round(video.videoWidth*k),h=Math.round(video.videoHeight*k);
-  if(w!==W||h!==H){W=w;H=h;for(const c of[canvas,D,T0,T,G]){c.width=W;c.height=H}}
+  if(w!==W||h!==H){W=w;H=h;for(const c of[canvas,veil,D,T0,T,G,Mu,Br]){c.width=W;c.height=H}}
   const ts=performance.now();n++;
   try{R.hands=hand.detectForVideo(video,ts)}catch(e){console.warn(e)}
   const job=["face","pose","seg","face"][n%4];
@@ -600,7 +618,7 @@ async function startCam(){
   stream?.getTracks().forEach(t=>t.stop());
   stream=await navigator.mediaDevices.getUserMedia({audio:false,video:{facingMode:facing,width:{ideal:960},height:{ideal:720}}});
   video.srcObject=stream;await video.play();
-  const m=facing==="user";video.classList.toggle("mirror",m);canvas.classList.toggle("mirror",m);
+  const m=facing==="user";for(const el of[video,canvas,veil])el.classList.toggle("mirror",m);
 }
 async function make(Cls,fs,path,extra){
   const mk=d=>Cls.createFromOptions(fs,{baseOptions:{modelAssetPath:MODELS+path,delegate:d},runningMode:"VIDEO",...extra});
@@ -636,6 +654,8 @@ function toggle(id,key,after){$(id).onclick=()=>{O[key]=!O[key];$(id).setAttribu
 toggle("bMus","musc");toggle("bBrain","brain");
 toggle("bBody","body",()=>{if(!O.body)R.pose=null});
 toggle("bCam","cam",()=>video.classList.toggle("off",!O.cam));
+$("rSkin").oninput=e=>skinA=e.target.value/100;
+$("rLayer").oninput=e=>layerA=e.target.value/100;
 $("bFlip").onclick=async()=>{
   facing=facing==="user"?"environment":"user";
   try{await startCam()}catch{facing=facing==="user"?"environment":"user";try{await startCam()}catch{}}
